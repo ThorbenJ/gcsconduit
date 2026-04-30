@@ -23,13 +23,13 @@ All flags have an environment variable equivalent prefixed with `GCSC_`.
 
 ```sh
 # Public bucket, no authentication
-docker run -p 8080:8080 <region>-docker.pkg.dev/elastic-sa/sass-docker-repo/gcsconduit:latest
+docker run -p 8080:8080 <region>-docker.pkg.dev/<project>/<repo>/gcsconduit:latest
 
 # Private bucket with a service account key
 docker run -p 8080:8080 \
   -v /path/to/key.json:/creds/key.json:ro \
   -e GCSC_CREDENTIAL=/creds/key.json \
-  <region>-docker.pkg.dev/elastic-sa/sass-docker-repo/gcsconduit:latest
+  <region>-docker.pkg.dev/<project>/<repo>/gcsconduit:latest
 ```
 
 Once running, objects are accessible at `http://localhost:8080/<bucket>/<object>`:
