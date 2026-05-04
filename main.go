@@ -42,28 +42,31 @@ type matchRule struct {
 	re     *regexp.Regexp
 }
 
-// matchRules implements flag.Value for repeatable -reqmatch flags.
 type matchRules []matchRule
 
-func (m *matchRules) String() string {
-	parts := make([]string, len(*m))
-	for i, r := range *m {
-		parts[i] = r.header + "=" + r.re.String()
+// parseMatchRules parses "[Header]:[Regex];[Header]:[Regex]" syntax.
+// The first ':' in each ';'-delimited segment is the header/regex separator,
+// so regex patterns may themselves contain ':'.
+func parseMatchRules(s string) (matchRules, error) {
+	var rules matchRules
+	for part := range strings.SplitSeq(s, ";") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		idx := strings.Index(part, ":")
+		if idx < 0 {
+			return nil, fmt.Errorf("expected Header:Regex, got: %s", part)
+		}
+		header := strings.TrimSpace(part[:idx])
+		pattern := part[idx+1:]
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return nil, fmt.Errorf("invalid regex for %s: %v", header, err)
+		}
+		rules = append(rules, matchRule{header: header, re: re})
 	}
-	return strings.Join(parts, "|")
-}
-
-func (m *matchRules) Set(s string) error {
-	parts := strings.SplitN(s, "=", 2)
-	if len(parts) != 2 {
-		return fmt.Errorf("expected header=regex, got: %s", s)
-	}
-	re, err := regexp.Compile(parts[1])
-	if err != nil {
-		return fmt.Errorf("invalid regex for %s: %v", parts[0], err)
-	}
-	*m = append(*m, matchRule{header: strings.TrimSpace(parts[0]), re: re})
-	return nil
+	return rules, nil
 }
 
 func envOr(key, def string) string {
@@ -74,25 +77,15 @@ func envOr(key, def string) string {
 }
 
 func main() {
-	portFlag    := flag.String("port", envOr("PORT", "8080"), "listen port [$GCSC_PORT]")
-	credFlag    := flag.String("credential", envOr("CREDENTIAL", ""), "GCP service account JSON path [$GCSC_CREDENTIAL]")
+	portFlag := flag.String("port", envOr("PORT", "8080"), "listen port [$GCSC_PORT]")
+	credFlag := flag.String("credential", envOr("CREDENTIAL", ""), "GCP service account JSON path [$GCSC_CREDENTIAL]")
 	inspectFlag := flag.String("inspect", envOr("INSPECT", ""), "append req/res header dump (YAML) to this file [$GCSC_INSPECT]")
-
-	var rules matchRules
-	flag.Var(&rules, "reqmatch", "required header=regex guard, repeatable [$GCSC_REQMATCH pipe-separated]")
+	reqmatchFlag := flag.String("reqmatch", envOr("REQMATCH", ""), `header guard rules "Header:Regex;Header:Regex" [$GCSC_REQMATCH]`)
 	flag.Parse()
 
-	// Load reqmatch from env only when no CLI flags were given.
-	if len(rules) == 0 {
-		if env := os.Getenv(envPrefix + "REQMATCH"); env != "" {
-			for part := range strings.SplitSeq(env, "|") {
-				if part = strings.TrimSpace(part); part != "" {
-					if err := rules.Set(part); err != nil {
-						log.Fatalf("invalid %sREQMATCH: %v", envPrefix, err)
-					}
-				}
-			}
-		}
+	rules, err := parseMatchRules(*reqmatchFlag)
+	if err != nil {
+		log.Fatalf("invalid -reqmatch: %v", err)
 	}
 
 	credPath := *credFlag
@@ -153,6 +146,15 @@ func waitForFile(path string) {
 	}
 }
 
+func firstHeader(h http.Header, keys ...string) string {
+	for _, k := range keys {
+		if v := h.Get(k); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 type proxy struct {
 	client    atomic.Pointer[http.Client]
 	rules     matchRules
@@ -168,10 +170,13 @@ func (p *proxy) handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, rule := range p.rules {
-		val := r.Header.Get(rule.header)
+		val := firstHeader(r.Header, rule.header, "X-"+rule.header)
 		if val == "" || !rule.re.MatchString(val) {
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			log.Printf("403 reqmatch %s from %s", rule.header, r.RemoteAddr)
+			if p.inspect != nil {
+				p.writeInspect(r, http.StatusForbidden, nil)
+			}
 			return
 		}
 	}
@@ -218,11 +223,11 @@ func (p *proxy) handle(w http.ResponseWriter, r *http.Request) {
 	log.Printf("%s %s → %d (%s)", r.Method, r.URL.Path, resp.StatusCode, r.RemoteAddr)
 
 	if p.inspect != nil {
-		p.writeInspect(r, resp)
+		p.writeInspect(r, resp.StatusCode, resp.Header)
 	}
 }
 
-func (p *proxy) writeInspect(r *http.Request, resp *http.Response) {
+func (p *proxy) writeInspect(r *http.Request, status int, respHeader http.Header) {
 	var b strings.Builder
 	b.WriteString("---\n")
 	fmt.Fprintf(&b, "timestamp: %s\n", time.Now().UTC().Format(time.RFC3339))
@@ -235,8 +240,8 @@ func (p *proxy) writeInspect(r *http.Request, resp *http.Response) {
 	for k, vv := range r.Header {
 		fmt.Fprintf(&b, "  %s: %s\n", k, strings.Join(vv, ", "))
 	}
-	fmt.Fprintf(&b, "response:\n  status: %d\n", resp.StatusCode)
-	for k, vv := range resp.Header {
+	fmt.Fprintf(&b, "response:\n  status: %d\n", status)
+	for k, vv := range respHeader {
 		fmt.Fprintf(&b, "  %s: %s\n", k, strings.Join(vv, ", "))
 	}
 
