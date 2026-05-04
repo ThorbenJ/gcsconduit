@@ -81,6 +81,7 @@ func main() {
 	credFlag := flag.String("credential", envOr("CREDENTIAL", ""), "GCP service account JSON path [$GCSC_CREDENTIAL]")
 	inspectFlag := flag.String("inspect", envOr("INSPECT", ""), "append req/res header dump (YAML) to this file [$GCSC_INSPECT]")
 	reqmatchFlag := flag.String("reqmatch", envOr("REQMATCH", ""), `header guard rules "Header:Regex;Header:Regex" [$GCSC_REQMATCH]`)
+	bucketsFlag := flag.String("buckets", envOr("BUCKETS", ""), "regex for allowed bucket names; default locks to first requested bucket [$GCSC_BUCKETS]")
 	flag.Parse()
 
 	rules, err := parseMatchRules(*reqmatchFlag)
@@ -88,9 +89,20 @@ func main() {
 		log.Fatalf("invalid -reqmatch: %v", err)
 	}
 
+	var bucketsRe *regexp.Regexp
+	if *bucketsFlag != "" {
+		bucketsRe, err = regexp.Compile(*bucketsFlag)
+		if err != nil {
+			log.Fatalf("invalid -buckets: %v", err)
+		}
+	}
+
 	credPath := *credFlag
 
 	p := &proxy{rules: rules}
+	if bucketsRe != nil {
+		p.buckets.Store(bucketsRe)
+	}
 
 	if *inspectFlag != "" {
 		f, err := os.OpenFile(*inspectFlag, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -119,7 +131,7 @@ func main() {
 	mux.HandleFunc("/", p.handle)
 
 	addr := ":" + *portFlag
-	log.Printf("gcsconduit listening on %s (credential: %q, reqmatch rules: %d)", addr, credPath, len(rules))
+	log.Printf("gcsconduit listening on %s (credential: %q, reqmatch rules: %d, buckets: %q)", addr, credPath, len(rules), *bucketsFlag)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatal(err)
 	}
@@ -157,6 +169,7 @@ func firstHeader(h http.Header, keys ...string) string {
 
 type proxy struct {
 	client    atomic.Pointer[http.Client]
+	buckets   atomic.Pointer[regexp.Regexp] // nil = lock to first requested bucket
 	rules     matchRules
 	inspect   *os.File
 	inspectMu sync.Mutex
@@ -183,6 +196,24 @@ func (p *proxy) handle(w http.ResponseWriter, r *http.Request) {
 
 	if r.URL.Path == "/" {
 		http.Error(w, "path required: /bucket/path/to/file", http.StatusBadRequest)
+		return
+	}
+
+	bucket := strings.SplitN(r.URL.Path[1:], "/", 2)[0]
+	re := p.buckets.Load()
+	if re == nil {
+		derived := regexp.MustCompile("^" + regexp.QuoteMeta(bucket) + "$")
+		if p.buckets.CompareAndSwap(nil, derived) {
+			log.Printf("bucket lock: %s", derived)
+		}
+		re = p.buckets.Load()
+	}
+	if !re.MatchString(bucket) {
+		http.Error(w, "Not Found", http.StatusNotFound)
+		log.Printf("404 bucket %q not allowed from %s", bucket, r.RemoteAddr)
+		if p.inspect != nil {
+			p.writeInspect(r, http.StatusNotFound, nil)
+		}
 		return
 	}
 
