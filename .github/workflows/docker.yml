@@ -30,7 +30,6 @@ jobs:
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=
 
       - name: Set up QEMU (for multi-arch)
