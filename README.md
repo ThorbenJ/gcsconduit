@@ -16,7 +16,8 @@ All flags have an environment variable equivalent prefixed with `GCSC_`.
 |------|---------|---------|-------------|
 | `-port` | `GCSC_PORT` | `8080` | Listen port |
 | `-credential` | `GCSC_CREDENTIAL` | _(none)_ | Path to a GCP service account JSON key file. If unset, requests are forwarded unauthenticated (suitable for public buckets). |
-| `-reqmatch` | `GCSC_REQMATCH` | _(none)_ | Repeatable header guard: only forward requests where the named header matches a regex. Format: `Header=regex`. Pipe-separate multiple rules in the env var. |
+| `-reqmatch` | `GCSC_REQMATCH` | _(none)_ | Header guard rules. Format: `Header:Regex`. Semicolon-separate multiple rules. |
+| `-buckets` | `GCSC_BUCKETS` | _(none)_ | Regex for allowed bucket names. If unset, the proxy locks to the first bucket it receives a request for. |
 | `-inspect` | `GCSC_INSPECT` | _(none)_ | Path to a file where request and response headers are appended in YAML for troubleshooting. |
 
 ## Running
@@ -46,17 +47,33 @@ curl -H "Range: bytes=0-1023" http://localhost:8080/my-bucket/video.mp4
 
 ## Request guards (`-reqmatch`)
 
-The `-reqmatch` flag (repeatable) rejects any request where a named header is absent or does not match a regular expression. This is useful for restricting access without a full auth layer.
+`-reqmatch` rejects any request where a named header is absent or does not match a regular expression. This is useful for restricting access without a full auth layer.
+
+The format is `Header:Regex`. The first `:` separates the header name from the pattern, so regex patterns may contain `:` freely. Multiple rules are separated by `;`. For each rule, the proxy accepts either the bare header name or its `X-` prefixed equivalent (e.g. a rule for `Access-Token` also matches `X-Access-Token`).
 
 ```sh
 # Only forward requests that carry a specific token
-gcsconduit -reqmatch "X-Access-Token=^mysecret$"
+gcsconduit -reqmatch "X-Access-Token:^mysecret$"
 
-# Multiple guards via env var (pipe-separated)
-GCSC_REQMATCH="X-Access-Token=^mysecret$|X-Tenant=^acme$" gcsconduit
+# Multiple guards (semicolon-separated, works in both flag and env var)
+GCSC_REQMATCH="X-Access-Token:^mysecret$;X-Tenant:^acme$" gcsconduit
 ```
 
 Requests that fail a guard receive `403 Forbidden`.
+
+## Bucket access control (`-buckets`)
+
+By default, gcsconduit locks to the first bucket it receives a request for and rejects requests for any other bucket with `404 Not Found`. This prevents accidental cross-bucket access without any extra configuration.
+
+To allow a specific set of buckets, pass a regex to `-buckets`:
+
+```sh
+# Allow any bucket whose name starts with "my-project-"
+gcsconduit -buckets "^my-project-"
+
+# Allow exactly two buckets
+gcsconduit -buckets "^(assets|media)$"
+```
 
 ## Inspect mode
 
@@ -98,7 +115,3 @@ docker build -t gcsconduit .
 # Or publish via Cloud Build
 gcloud builds submit --tag <region>-docker.pkg.dev/<project>/<repo>/gcsconduit:$(date -u +%Y-%m-%d)
 ```
-
-## Extending to other storage backends
-
-gcsconduit proxies to a configurable base URL (`gcsBase` in `main.go`). Since authentication is the only GCS-specific concern — and that is isolated to `buildClient` — adapting the proxy to other HTTP-based object storage APIs (S3-compatible, Azure Blob, etc.) is straightforward: swap the base URL and the token source.

@@ -179,6 +179,7 @@ func (p *proxy) handle(w http.ResponseWriter, r *http.Request) {
 	client := p.client.Load()
 	if client == nil {
 		http.Error(w, "initializing", http.StatusServiceUnavailable)
+		p.writeInspect(r, http.StatusServiceUnavailable, nil)
 		return
 	}
 
@@ -186,16 +187,14 @@ func (p *proxy) handle(w http.ResponseWriter, r *http.Request) {
 		val := firstHeader(r.Header, rule.header, "X-"+rule.header)
 		if val == "" || !rule.re.MatchString(val) {
 			http.Error(w, "Forbidden", http.StatusForbidden)
-			log.Printf("403 reqmatch %s from %s", rule.header, r.RemoteAddr)
-			if p.inspect != nil {
-				p.writeInspect(r, http.StatusForbidden, nil)
-			}
+			p.writeInspect(r, http.StatusForbidden, nil)
 			return
 		}
 	}
 
 	if r.URL.Path == "/" {
 		http.Error(w, "path required: /bucket/path/to/file", http.StatusBadRequest)
+		p.writeInspect(r, http.StatusBadRequest, nil)
 		return
 	}
 
@@ -211,9 +210,7 @@ func (p *proxy) handle(w http.ResponseWriter, r *http.Request) {
 	if !re.MatchString(bucket) {
 		http.Error(w, "Not Found", http.StatusNotFound)
 		log.Printf("404 bucket %q not allowed from %s", bucket, r.RemoteAddr)
-		if p.inspect != nil {
-			p.writeInspect(r, http.StatusNotFound, nil)
-		}
+		p.writeInspect(r, http.StatusNotFound, nil)
 		return
 	}
 
@@ -225,6 +222,7 @@ func (p *proxy) handle(w http.ResponseWriter, r *http.Request) {
 	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, target, r.Body)
 	if err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
+		p.writeInspect(r, http.StatusBadRequest, nil)
 		return
 	}
 
@@ -242,6 +240,7 @@ func (p *proxy) handle(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		log.Printf("502 %s %s: %v", r.Method, target, err)
+		p.writeInspect(r, http.StatusBadGateway, nil)
 		return
 	}
 	defer resp.Body.Close()
@@ -252,13 +251,14 @@ func (p *proxy) handle(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.Copy(w, resp.Body)
 
 	log.Printf("%s %s → %d (%s)", r.Method, r.URL.Path, resp.StatusCode, r.RemoteAddr)
-
-	if p.inspect != nil {
-		p.writeInspect(r, resp.StatusCode, resp.Header)
-	}
+	p.writeInspect(r, resp.StatusCode, resp.Header)
 }
 
 func (p *proxy) writeInspect(r *http.Request, status int, respHeader http.Header) {
+	if p.inspect == nil {
+		return
+	}
+
 	var b strings.Builder
 	b.WriteString("---\n")
 	fmt.Fprintf(&b, "timestamp: %s\n", time.Now().UTC().Format(time.RFC3339))
