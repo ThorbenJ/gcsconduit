@@ -24,13 +24,13 @@ All flags have an environment variable equivalent prefixed with `GCSC_`.
 
 ```sh
 # Public bucket, no authentication
-docker run -p 8080:8080 <region>-docker.pkg.dev/<project>/<repo>/gcsconduit:latest
+docker run -p 8080:8080 ghcr.io/ThorbenJ/gcsconduit:latest
 
 # Private bucket with a service account key
 docker run -p 8080:8080 \
   -v /path/to/key.json:/creds/key.json:ro \
   -e GCSC_CREDENTIAL=/creds/key.json \
-  <region>-docker.pkg.dev/<project>/<repo>/gcsconduit:latest
+  ghcr.io/ThorbenJ/gcsconduit:latest
 ```
 
 Once running, objects are accessible at `http://localhost:8080/<bucket>/<object>`:
@@ -111,7 +111,4 @@ Set `GCSC_CREDENTIAL=/tmp/gcs.creds` as an environment variable on the container
 
 ```sh
 docker build -t gcsconduit .
-
-# Or publish via Cloud Build
-gcloud builds submit --tag <region>-docker.pkg.dev/<project>/<repo>/gcsconduit:$(date -u +%Y-%m-%d)
 ```
